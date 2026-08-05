@@ -107,15 +107,22 @@ def webhook():
 
     return "ok"
 
+import asyncio
 
-@app.before_first_request
+
 def setup():
 
     init_db()
 
-    telegram_app.bot.set_webhook(
-        url=f"{WEBHOOK_URL}/webhook"
+    asyncio.run(
+        telegram_app.bot.set_webhook(
+            url=f"{WEBHOOK_URL}/webhook"
+        )
     )
+
+
+setup()
+
 
 
 if __name__ == "__main__":
