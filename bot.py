@@ -1,13 +1,22 @@
 import os
 import re
+import asyncio
+
 from flask import Flask, request
 
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters
+    CallbackQueryHandler,
+    filters,
+    ContextTypes
 )
 
 from database import init_db, exists, save
@@ -15,84 +24,189 @@ from verifier import verify
 
 
 TOKEN = os.environ["BOT_TOKEN"]
-
 WEBHOOK_URL = os.environ["WEBHOOK_URL"]
 
+
 app = Flask(__name__)
+
 
 telegram_app = Application.builder()\
     .token(TOKEN)\
     .build()
 
 
-async def start(update, context):
+
+# ======================
+# START
+# ======================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🧾 Verify Receipt",
+                callback_data="verify"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "ℹ️ Help",
+                callback_data="help"
+            )
+        ]
+    ]
+
     await update.message.reply_text(
-        "👋 Telebirr Receipt Verifier\nSend receipt number."
+        """
+👋 ሰላም!
+
+እኔ Telebirr Receipt Verification Bot ነኝ።
+
+የTelebirr ክፍያዎን በReceipt Number ወይም SMS Link ማረጋገጥ እችላለሁ።
+
+ከታች ይምረጡ።
+""",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-async def check(update, context):
+
+# ======================
+# BUTTONS
+# ======================
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+
+    await query.answer()
+
+
+    if query.data == "verify":
+
+        await query.message.reply_text(
+            """
+🧾 Receipt Number ወይም Telebirr SMS Link ይላኩ።
+
+ምሳሌ:
+DGH9WN4E4H
+"""
+        )
+
+
+    elif query.data == "help":
+
+        await query.message.reply_text(
+            """
+ℹ️ Help
+
+1. Telebirr SMS Receipt Link ይላኩ
+ወይም
+2. Receipt Number ብቻ ይላኩ
+
+Bot ክፍያውን ያረጋግጣል።
+"""
+        )
+
+
+
+# ======================
+# VERIFY
+# ======================
+
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
+
 
     match = re.search(
         r"receipt/([A-Z0-9]+)",
         text
     )
 
-    receipt = match.group(1) if match else text
+
+    receipt = (
+        match.group(1)
+        if match
+        else text
+    )
+
+
+    msg = await update.message.reply_text(
+        "🔍 Receipt እየመረመርኩ ነው..."
+    )
 
 
     if exists(receipt):
-        await update.message.reply_text(
-            "⚠️ Already verified"
+
+        await msg.edit_text(
+            """
+⚠️ ይህ Receipt ከዚህ በፊት ተረጋግጧል።
+"""
         )
+
         return
+
 
 
     result = verify(receipt)
 
+
+
     if not result:
-        await update.message.reply_text(
-            "❌ Invalid receipt"
+
+        await msg.edit_text(
+            """
+❌ Receipt አልተገኘም።
+
+እባክዎ Receipt Number እንደገና ይላኩ።
+"""
         )
+
         return
+
 
 
     save(result)
 
 
-    await update.message.reply_text(
+
+    await msg.edit_text(
 f"""
-✅ Verified
+✅ ክፍያ ተረጋግጧል
 
 🧾 Receipt:
 {result['receipt']}
 
-💰 Amount:
-{result['amount']} ETB
+👤 ላኪ:
+{result['sender']}
 
-📅 Date:
+💰 መጠን:
+{result['amount']} ብር
+
+📅 ቀን:
 {result['date']}
+
+📌 Status:
+SUCCESS
+
+
+ስለ Telebirr አጠቃቀምዎ እናመሰግናለን 🙏
 """
     )
 
 
-telegram_app.add_handler(
-    CommandHandler("start", start)
-)
 
-telegram_app.add_handler(
-    MessageHandler(
-        filters.TEXT,
-        check
-    )
-)
+# ======================
+# WEBHOOK
+# ======================
 
-
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    return "Telebirr Bot Running"
+
+    return "Telebirr Smart Bot Running"
+
 
 
 @app.route("/webhook", methods=["POST"])
@@ -103,30 +217,51 @@ def webhook():
         telegram_app.bot
     )
 
+
     telegram_app.update_queue.put_nowait(update)
+
 
     return "ok"
 
-import asyncio
 
 
-def setup():
+# ======================
+# INIT
+# ======================
+
+telegram_app.add_handler(
+    CommandHandler(
+        "start",
+        start
+    )
+)
+
+
+telegram_app.add_handler(
+    CallbackQueryHandler(
+        button
+    )
+)
+
+
+telegram_app.add_handler(
+    MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        check
+    )
+)
+
+
+
+async def setup():
 
     init_db()
 
-    asyncio.run(
-        telegram_app.bot.set_webhook(
-            url=f"{WEBHOOK_URL}/webhook"
-        )
+    await telegram_app.initialize()
+
+    await telegram_app.bot.set_webhook(
+        f"{WEBHOOK_URL}/webhook"
     )
 
 
-setup()
-
-
-
-if __name__ == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT",5000))
-    )
+asyncio.run(setup())
