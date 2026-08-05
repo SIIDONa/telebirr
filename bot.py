@@ -8,7 +8,6 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 )
 
-# እነዚህ ፋይሎች (database.py እና verifier.py) ከቦቱ ጋር አብረው መኖር አለባቸው
 from database import init_db, exists, save
 from verifier import verify
 
@@ -16,10 +15,6 @@ TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 app = Flask(__name__)
-
-# ======================
-# TELEGRAM APP SETUP
-# ======================
 telegram_app = Application.builder().token(TOKEN).build()
 
 # ======================
@@ -100,29 +95,37 @@ telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check))
 
 
 # ======================
-# BACKGROUND LOOP (FIX)
+# WORKER-SAFE BACKGROUND LOOP
 # ======================
-loop = asyncio.new_event_loop()
+worker_loop = None
+bot_initialized = False
+lock = threading.Lock()
 
-def start_background_loop(loop: asyncio.AbstractEventLoop):
+def start_background_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_forever()
 
-# አዲስ Thread ከፍተን Event Loop እንዲሮጥ እናደርጋለን (ለ Gunicorn ተስማሚ ነው)
-threading.Thread(target=start_background_loop, args=(loop,), daemon=True).start()
-
-async def setup_telegram():
-    init_db()  # ዳታቤዙን ማስጀመር
-    await telegram_app.initialize()
-    await telegram_app.start()
+def init_bot():
+    """Gunicorn Worker ውስጥ ቦቱን ማስጀመር"""
+    global worker_loop, bot_initialized
     
-    if WEBHOOK_URL:
-        # Webhook URL በማዘጋጀት ቴሌግራም መልእክቶችን ወደ እኛ ራውት እንዲልክ ማዘዝ
-        await telegram_app.bot.set_webhook(f"{WEBHOOK_URL.rstrip('/')}/webhook")
-        print(f"Webhook set to: {WEBHOOK_URL}/webhook")
-
-# አፕሊኬሽኑ ሲነሳ Bot Setup እንዲደረግ ማዘዝ
-asyncio.run_coroutine_threadsafe(setup_telegram(), loop)
+    with lock:
+        if bot_initialized:
+            return
+            
+        worker_loop = asyncio.new_event_loop()
+        threading.Thread(target=start_background_loop, args=(worker_loop,), daemon=True).start()
+        
+        async def setup():
+            init_db()
+            await telegram_app.initialize()
+            await telegram_app.start()
+            if WEBHOOK_URL:
+                await telegram_app.bot.set_webhook(f"{WEBHOOK_URL.rstrip('/')}/webhook")
+                
+        # ቦቱን ማስጀመር
+        asyncio.run_coroutine_threadsafe(setup(), worker_loop)
+        bot_initialized = True
 
 
 # ======================
@@ -130,18 +133,22 @@ asyncio.run_coroutine_threadsafe(setup_telegram(), loop)
 # ======================
 @app.route("/")
 def home():
+    init_bot() # ለደህንነት እዚህም እናስነሳዋለን
     return "Telebirr Smart Bot is Running Successfully!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # request.get_json(force=True) ቴሌግራም የሚልከውን ዳታ በአስተማማኝ ሁኔታ ይቀበላል
+    init_bot() # አዲሱ Gunicorn worker Thread መፍጠሩን ማረጋገጫ
+    
     data = request.get_json(force=True)
     if data:
         update = Update.de_json(data, telegram_app.bot)
-        # Updateን ወደ ተዘጋጀው background loop መላክ
-        asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+        if worker_loop:
+            # መልእክቱን ወደ worker's loop መላክ
+            asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), worker_loop)
+            
     return "ok", 200
 
-# ለአካባቢያዊ ቴስቲንግ (Render ላይ በ Gunicorn ስለሚሰራ ይህ አይነካም)
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
