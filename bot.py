@@ -1,71 +1,61 @@
+import os
 import re
+from flask import Flask, request
 
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters,
-    ContextTypes
+    filters
 )
 
-from config import BOT_TOKEN,ADMIN_ID
-from database import *
+from database import init_db, exists, save
 from verifier import verify
 
 
-async def start(update,context):
+TOKEN = os.environ["BOT_TOKEN"]
 
+WEBHOOK_URL = os.environ["WEBHOOK_URL"]
+
+app = Flask(__name__)
+
+telegram_app = Application.builder()\
+    .token(TOKEN)\
+    .build()
+
+
+async def start(update, context):
     await update.message.reply_text(
-        """
-👋 Telebirr Receipt Verifier
-
-Send receipt number or SMS link.
-"""
+        "👋 Telebirr Receipt Verifier\nSend receipt number."
     )
 
 
-async def check(update,context):
+async def check(update, context):
 
-    msg=update.message.text.strip()
+    text = update.message.text.strip()
 
-
-    match=re.search(
-        r'receipt/([A-Z0-9]+)',
-        msg
+    match = re.search(
+        r"receipt/([A-Z0-9]+)",
+        text
     )
 
-
-    receipt=(
-        match.group(1)
-        if match
-        else msg
-    )
+    receipt = match.group(1) if match else text
 
 
     if exists(receipt):
-
         await update.message.reply_text(
-            "⚠️ Receipt already verified."
+            "⚠️ Already verified"
         )
-
         return
 
 
-    await update.message.reply_text(
-        "🔍 Checking..."
-    )
-
-
-    result=verify(receipt)
-
+    result = verify(receipt)
 
     if not result:
-
         await update.message.reply_text(
             "❌ Invalid receipt"
         )
-
         return
 
 
@@ -74,78 +64,62 @@ async def check(update,context):
 
     await update.message.reply_text(
 f"""
-✅ Payment Verified
+✅ Verified
 
 🧾 Receipt:
 {result['receipt']}
-
-👤 Sender:
-{result['sender']}
 
 💰 Amount:
 {result['amount']} ETB
 
 📅 Date:
 {result['date']}
-
-📌 Status:
-{result['status']}
 """
+    )
+
+
+telegram_app.add_handler(
+    CommandHandler("start", start)
+)
+
+telegram_app.add_handler(
+    MessageHandler(
+        filters.TEXT,
+        check
+    )
 )
 
 
-
-async def stats(update,context):
-
-    if update.effective_user.id != ADMIN_ID:
-        return
+@app.route("/", methods=["GET"])
+def home():
+    return "Telebirr Bot Running"
 
 
-    await update.message.reply_text(
-        f"📊 Total Verified: {count()}"
+@app.route("/webhook", methods=["POST"])
+def webhook():
+
+    update = Update.de_json(
+        request.json,
+        telegram_app.bot
     )
 
+    telegram_app.update_queue.put_nowait(update)
+
+    return "ok"
 
 
-def main():
+@app.before_first_request
+def setup():
 
     init_db()
 
-
-    app=Application.builder()\
-    .token(BOT_TOKEN)\
-    .build()
-
-
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+    telegram_app.bot.set_webhook(
+        url=f"{WEBHOOK_URL}/webhook"
     )
 
 
-    app.add_handler(
-        CommandHandler(
-            "stats",
-            stats
-        )
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT",5000))
     )
-
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT,
-            check
-        )
-    )
-
-
-    print("Bot started")
-
-    app.run_polling()
-
-
-
-if __name__=="__main__":
-    main()
