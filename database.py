@@ -1,86 +1,43 @@
-import sqlite3
+import os
+import psycopg2
 
-DB = "receipts.db"
+# Render ላይ የምናስገባውን የዳታቤዝ ሊንክ ይቀበላል
+DB_URL = os.environ.get("DATABASE_URL")
 
-
-def db():
-    return sqlite3.connect(DB)
-
+def get_connection():
+    """ከ PostgreSQL ጋር ኮኔክሽን ይፈጥራል"""
+    if not DB_URL:
+        raise ValueError("DATABASE_URL is not set in environment variables!")
+    return psycopg2.connect(DB_URL)
 
 def init_db():
-
-    conn=db()
-    cur=conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS receipts(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        receipt TEXT UNIQUE,
-        sender TEXT,
-        amount TEXT,
-        date TEXT,
-        status TEXT,
-        created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
+    """ቴብሉን ይፈጥራል (ከሌለ ብቻ)"""
+    conn = get_connection()
+    c = conn.cursor()
+    # PostgreSQL ላይ REAL ን ወደ NUMERIC ወይም DOUBLE PRECISION እንቀይራለን
+    c.execute('''CREATE TABLE IF NOT EXISTS receipts
+                 (receipt_id TEXT PRIMARY KEY, amount NUMERIC, sender TEXT, date TEXT)''')
     conn.commit()
+    c.close()
     conn.close()
 
-
-
-def exists(receipt):
-
-    conn=db()
-    cur=conn.cursor()
-
-    cur.execute(
-        "SELECT receipt FROM receipts WHERE receipt=?",
-        (receipt,)
-    )
-
-    data=cur.fetchone()
-
+def exists(receipt_id):
+    """ሪሲፕቱ ከዚህ በፊት ጥቅም ላይ መዋሉን ማረጋገጥ"""
+    conn = get_connection()
+    c = conn.cursor()
+    # PostgreSQL parameters '%s' ይጠቀማል ('?' ን አይደለም)
+    c.execute("SELECT receipt_id FROM receipts WHERE receipt_id=%s", (receipt_id,))
+    result = c.fetchone()
+    c.close()
     conn.close()
-
-    return data is not None
-
-
+    return result is not None
 
 def save(data):
-
-    conn=db()
-    cur=conn.cursor()
-
-    cur.execute("""
-    INSERT OR IGNORE INTO receipts
-    (receipt,sender,amount,date,status)
-    VALUES(?,?,?,?,?)
-    """,
-    (
-        data["receipt"],
-        data["sender"],
-        data["amount"],
-        data["date"],
-        data["status"]
-    ))
-
+    """አዲሱን ሪሲፕት ወደ ዳታቤዝ ማስቀመጥ"""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("INSERT INTO receipts (receipt_id, amount, sender, date) VALUES (%s, %s, %s, %s)",
+              (data["transactionId"], data["amount"], data["payerName"], data["paymentDate"]))
     conn.commit()
+    c.close()
     conn.close()
-
-
-
-def count():
-
-    conn=db()
-    cur=conn.cursor()
-
-    cur.execute(
-        "SELECT COUNT(*) FROM receipts"
-    )
-
-    result=cur.fetchone()[0]
-
-    conn.close()
-
-    return result
