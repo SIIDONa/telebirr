@@ -1,5 +1,4 @@
 import os
-import re
 import asyncio
 import threading
 from flask import Flask, request
@@ -11,8 +10,15 @@ from telegram.ext import (
 from database import init_db, exists, save
 from verifier import verify
 
+# ======================
+# CONFIGURATION
+# ======================
 TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+
+# ያንተን የቴሌብር መረጃ እዚህ አስተካክል (ቦቱ ገንዘቡ ለአንተ መግባቱን የሚያረጋግጥበት)
+MY_RECEIVER_NAME = "Melaku Abraham Ersedo"
+MY_RECEIVER_PHONE = "2519XXXX4952" 
 
 app = Flask(__name__)
 telegram_app = Application.builder().token(TOKEN).build()
@@ -27,16 +33,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(
         "👋 ሰላም! እኔ Telebirr Receipt Verification Bot ነኝ።\n"
-        "የTelebirr ክፍያ Receipt Number ወይም SMS Receipt Link ላክልኝ። እኔ አረጋግጥልሃለሁ።",
+        "የቴሌብር ክፍያ Receipt Number ወይም SMS Receipt Link ላክልኝ እና አረጋግጥልሃለሁ።",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "ℹ️ እርዳታ\n"
-        "1) Receipt Number ላክ\n"
-        "2) ወይም Telebirr SMS Link ላክ\n"
-        "ምሳሌ: DGH9WN4E4H"
+        "ℹ️ መረጃ\n"
+        "1) Receipt Number ይላኩ (ምሳሌ: DGH9WN4E4H)\n"
+        "2) ወይም የ SMS ሊንኩን ሙሉውን ይላኩ"
     )
 
 # ======================
@@ -45,11 +50,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     if query.data == "verify":
         await query.message.reply_text("🧾 እባክዎ Receipt Number ወይም Link ላክ።")
     elif query.data == "help":
-        await query.message.reply_text("Receipt Number ላክ እና እመርምረዋለሁ።")
+        await query.message.reply_text("የከፈሉበትን ሪሲፕት ቁጥር ይላኩ እና እመርምረዋለሁ።")
 
 # ======================
 # RECEIPT CHECK
@@ -59,29 +63,41 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text.strip()
-    match = re.search(r"receipt/([A-Z0-9]+)", text, re.IGNORECASE)
-    receipt = match.group(1) if match else text
+    status_msg = await update.message.reply_text("🔍 ሪሲፕቱን እያጣራሁ ነው...")
     
-    status = await update.message.reply_text("🔍 Receipt እየመረመርኩ...")
+    # ሪሲፕቱን ከቴሌኮም ማጣራት
+    result = verify(text, expected_receiver_name=MY_RECEIVER_NAME, expected_receiver_no=MY_RECEIVER_PHONE)
     
-    if exists(receipt):
-        await status.edit_text("⚠️ ይህ Receipt ከዚህ በፊት ተጠቅመዋል።")
+    if not result["ok"]:
+        if result.get("transient"):
+            await status_msg.edit_text("⚠️ የቴሌብር ሲስተም በአሁኑ ሰአት አይሰራም (Busy)። እባክዎ ትንሽ ቆይተው ይሞክሩ።")
+        else:
+            await status_msg.edit_text(f"❌ {result['error']}")
+        return
+
+    if not result["verified"]:
+        await status_msg.edit_text(
+            f"❌ ማረጋገጥ አልተቻለም!\n"
+            f"ምክንያት፡ የተቀባዩ ስም/አካውንት አይመሳሰልም፣ ወይም ክፍያው አልተጠናቀቀም (Status: {result.get('status', 'Unknown')})።"
+        )
+        return
+
+    receipt_id = result["transactionId"]
+    
+    # ዳታቤዝ ላይ መኖሩን (Deduplication) ማረጋገጥ
+    if exists(receipt_id):
+        await status_msg.edit_text(f"⚠️ ይህ ሪሲፕት ({receipt_id}) ከዚህ በፊት ጥቅም ላይ ውሏል!")
         return
         
-    result = verify(receipt)
-    
-    if not result:
-        await status.edit_text("❌ Receipt አልተገኘም ወይም የተሳሳተ ነው።")
-        return
-        
+    # ዳታቤዝ ላይ ሴቭ ማድረግ
     save(result)
     
-    await status.edit_text(
-        f"✅ Payment Verified\n\n"
-        f"🧾 Receipt: {result.get('receipt', receipt)}\n"
-        f"👤 Sender: {result.get('sender', 'Unknown')}\n"
-        f"💰 Amount: {result.get('amount', '0.00')} ETB\n"
-        f"📅 Date: {result.get('date', 'Unknown')}\n"
+    await status_msg.edit_text(
+        f"✅ ክፍያዎ ተረጋግጧል!\n\n"
+        f"🧾 ሪሲፕት: {receipt_id}\n"
+        f"👤 የላኪ ስም: {result['payerName']}\n"
+        f"💰 መጠን: {result['amountText']}\n"
+        f"📅 ቀን: {result['paymentDate']}\n"
         f"📌 Status: SUCCESS"
     )
 
@@ -106,13 +122,10 @@ def start_background_loop(loop):
     loop.run_forever()
 
 def init_bot():
-    """Gunicorn Worker ውስጥ ቦቱን ማስጀመር"""
     global worker_loop, bot_initialized
-    
     with lock:
         if bot_initialized:
             return
-            
         worker_loop = asyncio.new_event_loop()
         threading.Thread(target=start_background_loop, args=(worker_loop,), daemon=True).start()
         
@@ -123,32 +136,26 @@ def init_bot():
             if WEBHOOK_URL:
                 await telegram_app.bot.set_webhook(f"{WEBHOOK_URL.rstrip('/')}/webhook")
                 
-        # ቦቱን ማስጀመር
         asyncio.run_coroutine_threadsafe(setup(), worker_loop)
         bot_initialized = True
-
 
 # ======================
 # FLASK WEBHOOK ROUTES
 # ======================
 @app.route("/")
 def home():
-    init_bot() # ለደህንነት እዚህም እናስነሳዋለን
-    return "Telebirr Smart Bot is Running Successfully!"
+    init_bot()
+    return "Telebirr Verification Bot is Running Successfully!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    init_bot() # አዲሱ Gunicorn worker Thread መፍጠሩን ማረጋገጫ
-    
+    init_bot()
     data = request.get_json(force=True)
     if data:
         update = Update.de_json(data, telegram_app.bot)
         if worker_loop:
-            # መልእክቱን ወደ worker's loop መላክ
             asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), worker_loop)
-            
     return "ok", 200
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
